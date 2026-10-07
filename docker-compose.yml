@@ -1,0 +1,72 @@
+
+networks:
+  frontend-network:
+  backend-network:
+  
+services:
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    networks:
+      - backend-network
+      - frontend-network
+    depends_on:
+      - backend
+      - crm
+
+  postgres:
+    image: postgres:15.3
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${PGUSER}
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+      POSTGRES_DB: ${PGDATABASE}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend
+    env_file:
+      - ./backend/.env
+    ports:
+      - "4000"
+    depends_on:
+      - postgres
+    networks:
+      - backend-network
+
+  bff:
+    build:
+      context: ./bff
+      dockerfile: Dockerfile
+    container_name: bff
+    env_file:
+      - ./bff/.env
+    ports:
+      - "4001:4001"
+    depends_on:
+      - backend
+    networks:
+      - frontend-network
+      - backend-network
+
+  crm:
+    build:
+      context: ./crm
+      dockerfile: Dockerfile
+    container_name: crm
+    ports:
+      - "3000"
+    networks:
+      - frontend-network
+volumes:
+  postgres_data:

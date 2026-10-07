@@ -1,0 +1,6 @@
+{
+  "watch": ["src"],
+  "ext": "ts",
+  "exec": "node --import tsx src/server.ts",
+  "signal": "SIGTERM"
+}
