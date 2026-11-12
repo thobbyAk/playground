@@ -1,0 +1,264 @@
+name: PR Reviewer
+
+# Runs on every PR open/update. All four checks below run in parallel as
+# separate jobs (GitHub Actions parallelizes jobs with no `needs:` between
+# them automatically); the final job waits for all of them and posts one
+# combined comment.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# No blanket token for the workflow - each job below grants itself only
+# what it needs (least privilege).
+permissions: {}
+
+# A new push to the PR cancels the in-flight run for the old commit instead
+# of letting both finish, so the summary comment always reflects the latest
+# commit.
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Scan for secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out PR code
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks needs full history, not just the latest commit
+          persist-credentials: false
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v3 # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  backend-test:
+    name: Backend tests (Node/TS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out PR code
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run tests
+        working-directory: backend
+        run: npm test
+
+  bff-test:
+    name: BFF tests (Node/TS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out PR code
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bff/package-lock.json
+
+      - name: Install dependencies
+        working-directory: bff
+        run: npm ci
+
+      - name: Run tests
+        working-directory: bff
+        run: npm test
+
+  crm-test:
+    name: CRM tests (React)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out PR code
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crm/package-lock.json
+
+      - name: Install dependencies
+        working-directory: crm
+        run: npm ci
+
+      - name: Run tests
+        working-directory: crm
+        # CI=true makes react-scripts test run once and exit instead of
+        # staying open in interactive watch mode (its default behavior).
+        run: CI=true npm test
+
+  claude-review:
+    name: AI bug review (Claude)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      findings: ${{ steps.review.outputs.structured_output }}
+    steps:
+      - name: Check out PR code
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0 # full history so the diff against the base branch below works
+          persist-credentials: false
+
+      - name: Fetch base branch for diffing
+        run: git fetch origin ${{ github.event.pull_request.base.ref }} --depth=50
+
+      - name: Review changed code
+        id: review
+        uses: anthropics/claude-code-action@v1 # v1.0.243
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            The PR branch is already checked out at HEAD. Run
+            `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`
+            to see exactly what changed in this PR, and read any touched
+            files for surrounding context.
+
+            This is a learning full-stack project: an Express/TypeScript
+            backend (backend/) and a BFF (bff/) talking to Postgres, and a
+            React CRM (crm/), fronted by nginx. Review ONLY the lines
+            changed in this PR, and ONLY report real defects - not style
+            preferences. Check specifically for:
+
+            1. SQL queries built with string concatenation or template
+               literals instead of parameterized placeholders ($1, $2, ...)
+               passed to `pool.query` - SQL injection risk.
+            2. New or changed Express routes that read or write user- or
+               auth-scoped data without going through the `requireAuth`
+               middleware.
+            3. Request body fields used in a DB query or response before
+               validating their type/shape (existing code checks e.g.
+               `typeof name === "string"` before use - new code should too).
+            4. Hardcoded credentials, API keys, tokens, or connection
+               strings in source - including demo/seed passwords placed in
+               a real code path rather than test fixtures.
+            5. `jwt.sign`/`jwt.verify` misuse: missing expiry, a weakened
+               secret fallback, or tokens being logged.
+            6. try/catch blocks that return a raw error object or stack
+               trace in an HTTP response instead of a generic message.
+            7. `rows[0]` or other array-index access on a DB query result
+               without first checking the result has at least one row.
+            8. React issues: `dangerouslySetInnerHTML` with unsanitized
+               data, missing `useEffect` dependency arrays, or unhandled
+               promise rejections.
+
+            Respond ONLY with the structured JSON matching the provided
+            schema. Do not post GitHub comments and do not modify any
+            files - another job posts the combined summary comment.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*)"
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"One or two sentence overall summary of the review"},"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["critical","high","medium","low"]},"file":{"type":"string"},"line":{"type":"string"},"description":{"type":"string"}},"required":["severity","file","description"]}}},"required":["summary","findings"]}'
+
+  pr-comment:
+    name: Post review summary
+    needs: [secret-scan, backend-test, bff-test, crm-test, claude-review]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post or update summary comment
+        uses: actions/github-script@v9 # v9.0.0
+        with:
+          script: |
+            const results = {
+              "Secret scan": "${{ needs.secret-scan.result }}",
+              "Backend tests": "${{ needs.backend-test.result }}",
+              "BFF tests": "${{ needs.bff-test.result }}",
+              "CRM tests": "${{ needs.crm-test.result }}",
+              "AI bug review": "${{ needs.claude-review.result }}",
+            };
+
+            const icon = (r) => ({ success: "✅", failure: "❌", cancelled: "⏭️", skipped: "⏭️" }[r] || "⚠️");
+
+            let body = "## PR Review Summary\n\n";
+            for (const [name, result] of Object.entries(results)) {
+              body += `- ${icon(result)} **${name}**: ${result}\n`;
+            }
+
+            const rawFindings = `${{ needs.claude-review.outputs.findings }}`;
+            body += "\n### AI bug review findings\n\n";
+            if (!rawFindings) {
+              body += "_No structured findings available (the review job did not complete)._\n";
+            } else {
+              try {
+                const parsed = JSON.parse(rawFindings);
+                body += `${parsed.summary}\n\n`;
+                if (!parsed.findings || parsed.findings.length === 0) {
+                  body += "No issues flagged against the review rules.\n";
+                } else {
+                  for (const f of parsed.findings) {
+                    const loc = f.line ? `${f.file}:${f.line}` : f.file;
+                    body += `- **[${f.severity}]** \`${loc}\` - ${f.description}\n`;
+                  }
+                }
+              } catch (e) {
+                body += "_Could not parse the AI review output._\n";
+              }
+            }
+
+            body += "\n<!-- pr-reviewer-summary -->";
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes("<!-- pr-reviewer-summary -->"));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

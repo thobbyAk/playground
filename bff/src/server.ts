@@ -31,7 +31,7 @@ app.post("/bff/login", async (req: Request, res: Response) => {
   const sessionId = createSession(accessToken, refreshToken);
 
  
-  res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, sameSite: "lax" });
+  res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true,secure: true, sameSite: "lax" });
   res.status(204).end();
 });
 

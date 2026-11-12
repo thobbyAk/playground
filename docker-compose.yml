@@ -37,8 +37,6 @@ services:
     container_name: backend
     env_file:
       - ./backend/.env
-    ports:
-      - "4000"
     depends_on:
       - postgres
     networks:
@@ -51,8 +49,6 @@ services:
     container_name: bff
     env_file:
       - ./bff/.env
-    ports:
-      - "4001:4001"
     depends_on:
       - backend
     networks:
@@ -64,8 +60,6 @@ services:
       context: ./crm
       dockerfile: Dockerfile
     container_name: crm
-    ports:
-      - "3000"
     networks:
       - frontend-network
 volumes:
