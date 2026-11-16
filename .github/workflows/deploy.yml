@@ -1,0 +1,46 @@
+name: Deploy
+
+# Runs after a change lands on master: SSH into the Hetzner VM, pull the new
+# code and rebuild the containers.
+on:
+  push:
+    branches: [master]
+
+# No blanket token: this workflow never calls the GitHub API, it only talks
+# to the VM over SSH, so it needs no permissions at all.
+permissions: {}
+
+# Deploys queue up instead of cancelling: killing a `docker compose up` half
+# way through could leave the VM with some services rebuilt and some not.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # The VM's host key is pinned in a secret on purpose: ssh refuses
+          # to connect if the server's key ever differs, instead of trusting
+          # whoever answers on that IP.
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd ~/playground && git pull --ff-only && docker compose up -d --build && docker compose ps'
